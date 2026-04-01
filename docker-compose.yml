@@ -1,0 +1,10 @@
+services:
+  opcua-proxy:
+    build: .
+    container_name: opcua-proxy-server
+    ports:
+      - "8080:8080"      # Web UI
+      - "49321:49321"     # OPC UA Proxy Server (port mặc định)
+    volumes:
+      - ./config.json:/app/config.json
+    restart: unless-stopped

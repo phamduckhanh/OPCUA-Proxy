@@ -1,0 +1,9 @@
+{
+  "sourceUrl": "opc.tcp://localhost:4840",
+  "proxyPort": 4940,
+  "autoConnect": true,
+  "autoStartProxy": true,
+  "tagConfig": {},
+  "excludeFolders": [],
+  "excludeVariables": []
+}

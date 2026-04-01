@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OPC UA Proxy Server</title>
+<style>
+/* ── Reset & Base ─────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+}
+/* ── Header ───────────────────────────────────────────── */
+.header {
+  background: #16213e;
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 2px solid #0066ff;
+  box-shadow: 0 2px 8px rgba(0,0,0,.4);
+}
+.header h1 { font-size: 20px; color: #fff; }
+.status-badges { display: flex; gap: 12px; }
+.badge {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; padding: 4px 12px;
+  background: #0d1b36; border-radius: 20px;
+}
+.dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  display: inline-block;
+}
+.dot.on  { background: #00e676; box-shadow: 0 0 6px #00e676; }
+.dot.off { background: #ff1744; box-shadow: 0 0 6px #ff1744; }
+
+/* ── Container ────────────────────────────────────────── */
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+/* ── Card ─────────────────────────────────────────────── */
+.card {
+  background: #16213e;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.3);
+}
+.card h2 {
+  font-size: 16px; margin-bottom: 14px;
+  color: #90caf9; border-bottom: 1px solid #233554;
+  padding-bottom: 8px;
+}
+
+/* ── Config ───────────────────────────────────────────── */
+.config-grid {
+  display: grid;
+  grid-template-columns: 1fr 200px;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+label { font-size: 13px; color: #90caf9; margin-bottom: 4px; display: block; }
+input[type="text"], input[type="number"] {
+  width: 100%; padding: 9px 12px;
+  background: #0d1b36; border: 1px solid #233554;
+  color: #fff; border-radius: 6px; font-size: 14px;
+  outline: none; transition: border-color .2s;
+}
+input:focus { border-color: #0066ff; }
+
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+button {
+  padding: 8px 18px; border: none; border-radius: 6px;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: opacity .2s, transform .1s;
+}
+button:hover { opacity: .85; }
+button:active { transform: scale(.97); }
+.btn-primary { background: #0066ff; color: #fff; }
+.btn-success { background: #00c853; color: #fff; }
+.btn-danger  { background: #ff1744; color: #fff; }
+.btn-warning { background: #ff9100; color: #fff; }
+button:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ── Bảng biến ────────────────────────────────────────── */
+.table-header {
+  display: flex; justify-content: space-between;
+  align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;
+}
+.table-header .info { font-size: 13px; color: #90caf9; }
+.search-box {
+  padding: 7px 12px; width: 280px;
+  background: #0d1b36; border: 1px solid #233554;
+  color: #fff; border-radius: 6px; font-size: 13px; outline: none;
+}
+.search-box:focus { border-color: #0066ff; }
+
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th {
+  background: #0d1b36; color: #90caf9;
+  padding: 10px 12px; text-align: left;
+  position: sticky; top: 0;
+  border-bottom: 2px solid #233554;
+}
+tbody td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #1a2744;
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+tbody tr:hover { background: #1a2744; }
+@keyframes highlightFade {
+  0%   { background: rgba(255,235,59,.25); }
+  100% { background: transparent; }
+}
+.highlight { animation: highlightFade 1s ease-out; }
+.btn-copy {
+  background: transparent; border: 1px solid #233554;
+  color: #90caf9; border-radius: 4px; cursor: pointer;
+  padding: 3px 8px; font-size: 13px; transition: background .2s;
+}
+.btn-copy:hover { background: #233554; }
+
+/* ── Log ──────────────────────────────────────────────── */
+.log-box {
+  background: #0d1b36; border-radius: 6px;
+  padding: 12px; height: 220px;
+  overflow-y: auto; font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 12px; line-height: 1.6;
+}
+.log-line { white-space: pre-wrap; word-break: break-all; }
+.log-line.ERROR   { color: #ff5252; }
+.log-line.WARNING { color: #ffab40; }
+.log-line.INFO    { color: #b0bec5; }
+
+/* ── Responsive ───────────────────────────────────────── */
+@media (max-width: 768px) {
+  .config-grid { grid-template-columns: 1fr; }
+  .search-box { width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────── -->
+<div class="header">
+  <h1>⚙ OPC UA Proxy Server</h1>
+  <div class="status-badges">
+    <div class="badge">
+      <span class="dot off" id="dotSource"></span>
+      <span id="lblSource">Source: Chưa kết nối</span>
+    </div>
+    <div class="badge">
+      <span class="dot off" id="dotProxy"></span>
+      <span id="lblProxy">Proxy: Dừng</span>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- ── Cấu hình ────────────────────────────────────────── -->
+<div class="card">
+  <h2>Cấu hình</h2>
+  <div class="config-grid">
+    <div>
+      <label for="sourceUrl">OPC UA Server nguồn</label>
+      <input type="text" id="sourceUrl" placeholder="opc.tcp://192.168.1.45:4840">
+    </div>
+    <div>
+      <label for="proxyPort">Port Proxy</label>
+      <input type="number" id="proxyPort" placeholder="49321" min="1024" max="65535">
+    </div>
+  </div>
+  <div style="display:flex;gap:16px;margin-bottom:14px;">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+      <input type="checkbox" id="autoConnect" checked> Tự động kết nối khi khởi động
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+      <input type="checkbox" id="autoStartProxy" checked> Tự động bật Proxy khi khởi động
+    </label>
+  </div>
+  <div style="margin-bottom:14px;">
+    <label for="excludeFolders">Bỏ qua folder (cách nhau bằng dấu phẩy)</label>
+    <input type="text" id="excludeFolders" placeholder="FolderA, FolderB">
+  </div>
+  <div style="margin-bottom:14px;">
+    <label for="excludeVariables">Bỏ qua biến (cách nhau bằng dấu phẩy)</label>
+    <input type="text" id="excludeVariables" placeholder="VarX, VarY">
+  </div>
+  <div style="margin-bottom:14px;">
+    <label for="tagConfig">Đổi tên biến (JSON: {"TênGốc": "TênMới", ...})</label>
+    <input type="text" id="tagConfig" placeholder='{"SourceTag1": "ProxyTag1"}'>
+  </div>
+  <div class="btn-row">
+    <button class="btn-primary" onclick="saveConfig()">💾 Lưu cấu hình</button>
+    <button class="btn-success" id="btnConnect" onclick="doConnect()">🔌 Kết nối</button>
+    <button class="btn-danger"  id="btnDisconnect" onclick="doDisconnect()" disabled>⛔ Ngắt kết nối</button>
+    <button class="btn-success" id="btnStart" onclick="doStart()">▶ Bật Proxy Server</button>
+    <button class="btn-danger"  id="btnStop" onclick="doStop()" disabled>⏹ Tắt Proxy Server</button>
+  </div>
+</div>
+
+<!-- ── Bảng biến ───────────────────────────────────────── -->
+<div class="card">
+  <h2>Biến đang Proxy</h2>
+  <div class="table-header">
+    <span class="info" id="varCount">Tổng: 0 biến</span>
+    <input type="text" class="search-box" id="searchBox" placeholder="Tìm kiếm biến..." oninput="filterTable()">
+  </div>
+  <div class="table-wrap" style="max-height:400px;overflow-y:auto;">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:50px">STT</th>
+          <th>Node ID</th>
+          <th>Tên gốc</th>
+          <th>Tên Proxy</th>
+          <th>Giá trị</th>
+          <th>Kiểu dữ liệu</th>
+          <th style="width:170px">Cập nhật lúc</th>
+          <th style="width:60px">Copy</th>
+        </tr>
+      </thead>
+      <tbody id="varBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── Log ──────────────────────────────────────────────── -->
+<div class="card">
+  <h2 style="display:flex;justify-content:space-between;align-items:center;">
+    Nhật ký hoạt động
+    <button class="btn-warning" onclick="clearLogs()" style="font-size:12px;padding:5px 12px;">🗑 Xóa log</button>
+  </h2>
+  <div class="log-box" id="logBox"></div>
+</div>
+
+</div><!-- container -->
+
+<script>
+/* ── API helpers ─────────────────────────────────────── */
+const api = (method, path, body) =>
+  fetch('/api/' + path, {
+    method,
+    headers: body ? {'Content-Type':'application/json'} : {},
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(async r => {
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'Lỗi không xác định');
+    return data;
+  });
+
+/* ── Trạng thái trước đó (để phát hiện giá trị đổi) ── */
+let prevValues = {};
+
+/* ── Load config ban đầu ─────────────────────────────── */
+async function loadConfig() {
+  try {
+    const cfg = await api('GET', 'config');
+    document.getElementById('sourceUrl').value = cfg.sourceUrl || '';
+    document.getElementById('proxyPort').value = cfg.proxyPort || 49321;
+    document.getElementById('autoConnect').checked = cfg.autoConnect !== false;
+    document.getElementById('autoStartProxy').checked = cfg.autoStartProxy !== false;
+    document.getElementById('excludeFolders').value = (cfg.excludeFolders || []).join(', ');
+    document.getElementById('excludeVariables').value = (cfg.excludeVariables || []).join(', ');
+    document.getElementById('tagConfig').value = Object.keys(cfg.tagConfig || {}).length
+      ? JSON.stringify(cfg.tagConfig) : '';
+  } catch(e) { console.error(e); }
+}
+
+/* ── Lưu cấu hình ────────────────────────────────────── */
+async function saveConfig() {
+  const sourceUrl = document.getElementById('sourceUrl').value.trim();
+  const proxyPort = parseInt(document.getElementById('proxyPort').value, 10);
+  if (!sourceUrl) return alert('Vui lòng nhập URL source server');
+  if (!proxyPort || proxyPort < 1024 || proxyPort > 65535)
+    return alert('Port phải trong khoảng 1024-65535');
+
+  const autoConnect = document.getElementById('autoConnect').checked;
+  const autoStartProxy = document.getElementById('autoStartProxy').checked;
+
+  // Parse excludeFolders/excludeVariables từ chuỗi phân cách bằng dấu phẩy
+  const excludeFolders = document.getElementById('excludeFolders').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const excludeVariables = document.getElementById('excludeVariables').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+  // Parse tagConfig JSON
+  let tagConfig = {};
+  const tagRaw = document.getElementById('tagConfig').value.trim();
+  if (tagRaw) {
+    try { tagConfig = JSON.parse(tagRaw); }
+    catch(e) { return alert('Đổi tên biến phải là JSON hợp lệ, ví dụ: {"Tag1": "NewTag1"}'); }
+  }
+
+  try {
+    await api('POST', 'config', { sourceUrl, proxyPort, autoConnect, autoStartProxy, tagConfig, excludeFolders, excludeVariables });
+    alert('Đã lưu cấu hình!');
+  } catch(e) { alert('Lỗi: ' + e.message); }
+}
+
+/* ── Kết nối / Ngắt / Bật / Tắt ──────────────────────── */
+async function doConnect() {
+  btn('btnConnect', true);
+  try { await api('POST', 'connect'); }
+  catch(e) { alert('Lỗi kết nối: ' + e.message); }
+  finally { btn('btnConnect', false); }
+}
+async function doDisconnect() {
+  try { await api('POST', 'disconnect'); }
+  catch(e) { alert('Lỗi: ' + e.message); }
+}
+async function doStart() {
+  btn('btnStart', true);
+  try { await api('POST', 'start'); }
+  catch(e) { alert('Lỗi bật proxy: ' + e.message); }
+  finally { btn('btnStart', false); }
+}
+async function doStop() {
+  try { await api('POST', 'stop'); }
+  catch(e) { alert('Lỗi: ' + e.message); }
+}
+
+function btn(id, loading) {
+  document.getElementById(id).disabled = loading;
+}
+
+/* ── Xóa log ─────────────────────────────────────────── */
+async function clearLogs() {
+  try { await api('POST', 'logs/clear'); }
+  catch(e) { console.error(e); }
+}
+
+/* ── Cập nhật trạng thái ─────────────────────────────── */
+async function refreshStatus() {
+  try {
+    const s = await api('GET', 'status');
+    // Source badge
+    const dotSrc = document.getElementById('dotSource');
+    const lblSrc = document.getElementById('lblSource');
+    dotSrc.className = 'dot ' + (s.sourceConnected ? 'on' : 'off');
+    lblSrc.textContent = s.sourceConnected ? 'Source: Đã kết nối' : 'Source: Chưa kết nối';
+
+    // Proxy badge
+    const dotPrx = document.getElementById('dotProxy');
+    const lblPrx = document.getElementById('lblProxy');
+    dotPrx.className = 'dot ' + (s.proxyRunning ? 'on' : 'off');
+    let proxyTxt = s.proxyRunning ? 'Proxy: Đang chạy' : 'Proxy: Dừng';
+    if (s.proxyRunning && s.uptime != null) {
+      const m = Math.floor(s.uptime / 60), sec = s.uptime % 60;
+      proxyTxt += ` (${m}m ${sec}s)`;
+    }
+    lblPrx.textContent = proxyTxt;
+
+    // Nút bấm
+    document.getElementById('btnConnect').disabled = s.sourceConnected;
+    document.getElementById('btnDisconnect').disabled = !s.sourceConnected;
+    document.getElementById('btnStart').disabled = s.proxyRunning;
+    document.getElementById('btnStop').disabled = !s.proxyRunning;
+  } catch(e) { /* ignore */ }
+}
+
+/* ── Cập nhật bảng biến ──────────────────────────────── */
+async function refreshVariables() {
+  try {
+    const vars = await api('GET', 'variables');
+    document.getElementById('varCount').textContent = `Tổng: ${vars.length} biến`;
+
+    const filter = document.getElementById('searchBox').value.toLowerCase();
+    const tbody = document.getElementById('varBody');
+    const filtered = filter
+      ? vars.filter(v => v.nodeId.toLowerCase().includes(filter)
+          || (v.browseName||'').toLowerCase().includes(filter)
+          || (v.proxyBrowseName||'').toLowerCase().includes(filter))
+      : vars;
+
+    tbody.innerHTML = '';
+    filtered.forEach((v, i) => {
+      const tr = document.createElement('tr');
+      const valStr = v.value != null ? String(v.value) : '';
+
+      // Phát hiện giá trị thay đổi → highlight
+      const prevVal = prevValues[v.nodeId];
+      if (prevVal !== undefined && prevVal !== valStr) {
+        tr.classList.add('highlight');
+      }
+      prevValues[v.nodeId] = valStr;
+
+      const ts = v.lastUpdate
+        ? new Date(v.lastUpdate).toLocaleString('vi-VN', {hour12:false})
+        : '';
+
+      const proxyName = v.proxyBrowseName || v.browseName || '';
+
+      tr.innerHTML =
+        `<td>${i+1}</td>` +
+        `<td title="${esc(v.nodeId)}">${esc(v.nodeId)}</td>` +
+        `<td>${esc(v.browseName)}</td>` +
+        `<td>${esc(proxyName)}</td>` +
+        `<td>${esc(valStr)}</td>` +
+        `<td>${esc(v.dataType)}</td>` +
+        `<td>${ts}</td>` +
+        `<td><button class="btn-copy" onclick="copyVar('${esc(v.nodeId)}','${esc(proxyName)}')" title="Copy thông tin biến">📋</button></td>`;
+      tbody.appendChild(tr);
+    });
+  } catch(e) { /* ignore */ }
+}
+
+function filterTable() { refreshVariables(); }
+
+/* ── Copy thông tin biến vào clipboard ────────────────── */
+function copyVar(nodeId, browseName) {
+  const text = `NodeId: ${nodeId}\nBrowseName: ${browseName}`;
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('Đã copy thông tin biến!');
+  }).catch(() => {
+    // Fallback cho trình duyệt cũ
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy');
+    document.body.removeChild(ta);
+    showToast('Đã copy thông tin biến!');
+  });
+}
+
+function showToast(msg) {
+  let t = document.getElementById('toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    t.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#0066ff;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;opacity:0;transition:opacity .3s;';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  setTimeout(() => { t.style.opacity = '0'; }, 2000);
+}
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+/* ── Cập nhật log ────────────────────────────────────── */
+async function refreshLogs() {
+  try {
+    const logs = await api('GET', 'logs');
+    const box = document.getElementById('logBox');
+    box.innerHTML = logs.map(l => {
+      const t = new Date(l.time).toLocaleTimeString('vi-VN', {hour12:false});
+      return `<div class="log-line ${l.level}">[${t}] [${l.level}] ${esc(l.message)}</div>`;
+    }).join('');
+    box.scrollTop = box.scrollHeight;
+  } catch(e) { /* ignore */ }
+}
+
+/* ── Khởi chạy ────────────────────────────────────────── */
+loadConfig();
+refreshStatus();
+refreshVariables();
+refreshLogs();
+
+setInterval(refreshStatus, 1000);
+setInterval(refreshVariables, 1000);
+setInterval(refreshLogs, 2000);
+</script>
+</body>
+</html>
