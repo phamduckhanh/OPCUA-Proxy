@@ -1,0 +1,2 @@
+# Thư viện dùng khi phát triển và đóng gói exe (không cần trong production/Docker)
+pyinstaller

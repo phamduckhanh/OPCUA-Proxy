@@ -3,7 +3,9 @@
   "proxyPort": 4940,
   "autoConnect": true,
   "autoStartProxy": true,
-  "tagConfig": {},
+  "tagConfig": {
+    "SineWave": "SineWaveSimulation"
+  },
   "excludeFolders": [],
   "excludeVariables": []
 }

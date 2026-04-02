@@ -2,9 +2,12 @@ services:
   opcua-proxy:
     build: .
     container_name: opcua-proxy-server
+    image: pk178/work:opcua-proxy.latest
     ports:
       - "8080:8080"      # Web UI
       - "49321:49321"     # OPC UA Proxy Server (port mặc định)
     volumes:
       - ./config.json:/app/config.json
+      # Direct mode: đặt file CSV cạnh docker-compose.yml rồi uncomment dòng dưới
+      # - ./tags.csv:/app/tags.csv
     restart: unless-stopped

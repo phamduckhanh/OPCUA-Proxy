@@ -4,9 +4,10 @@ Khởi động FastAPI web server, phục vụ REST API và giao diện web.
 """
 
 import asyncio
+import csv
 import json
 import logging
-import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -26,11 +27,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-# ── Đường dẫn file ────────────────────────────────────────
+# Giảm log từ thư viện asyncua (quá verbose khi runtime)
+logging.getLogger("asyncua").setLevel(logging.WARNING)
+# Giảm log truy cập HTTP lặp lại
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
-BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "config.json"
-STATIC_DIR = BASE_DIR / "static"
+# ── Đường dẫn file ────────────────────────────────────────
+# Khi đóng gói thành exe bằng PyInstaller:
+#   - sys.frozen = True
+#   - sys._MEIPASS = thư mục tạm chứa các file bundled (static/, ...)
+#   - sys.executable = đường dẫn tới file .exe
+# Khi chạy bình thường bằng Python:
+#   - BASE_DIR = thư mục chứa main.py
+
+if getattr(sys, "frozen", False):
+    # Chạy trong môi trường PyInstaller exe
+    _BUNDLE_DIR = Path(sys._MEIPASS)          # chứa static/ đã bundle
+    _RUNTIME_DIR = Path(sys.executable).parent  # thư mục cạnh file .exe
+else:
+    # Chạy bình thường bằng Python
+    _BUNDLE_DIR = Path(__file__).resolve().parent
+    _RUNTIME_DIR = Path(__file__).resolve().parent
+
+STATIC_DIR = _BUNDLE_DIR / "static"
+# config.json luôn nằm cạnh exe (để người dùng dễ chỉnh sửa)
+CONFIG_PATH = _RUNTIME_DIR / "config.json"
+# tags.csv: copy file CSV cạnh exe/main.py để bật Direct mode
+TAG_CSV_PATH = _RUNTIME_DIR / "tags.csv"
 
 # ── Config mặc định ───────────────────────────────────────
 
@@ -43,6 +66,51 @@ DEFAULT_CONFIG = {
     "excludeFolders": [],
     "excludeVariables": [],
 }
+
+
+def load_tag_list_from_csv(path: Path) -> list[dict]:
+    """Phân tích file CSV export từ KEPServer/Ignition.
+
+    Định dạng yêu cầu:
+      Cột 'Tag Name' → tên tag expose trên proxy
+      Cột 'Address'  → NodeId OPC UA phía source (ví dụ: ns=3;s=...)
+      Cột 'Data Type'→ kiểu dữ liệu (Float, Boolean, Short, ...)
+    """
+    tags: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            raw_header = next(reader, None)
+            if raw_header is None:
+                return tags
+            header = [h.strip().strip('"').lower() for h in raw_header]
+            try:
+                idx_name = header.index("tag name")
+                idx_addr = header.index("address")
+                idx_dtype = header.index("data type")
+            except ValueError:
+                logger.warning(
+                    "File CSV không đúng định dạng "
+                    "(thiếu cột 'Tag Name', 'Address' hoặc 'Data Type')"
+                )
+                return tags
+            col_max = max(idx_name, idx_addr, idx_dtype)
+            for row in reader:
+                if len(row) <= col_max:
+                    continue
+                tag_name = row[idx_name].strip()
+                address = row[idx_addr].strip()
+                data_type = row[idx_dtype].strip()
+                if not tag_name or not address:
+                    continue
+                tags.append({
+                    "tagName": tag_name,
+                    "address": address,
+                    "dataType": data_type,
+                })
+    except Exception as e:
+        logger.warning(f"Lỗi đọc file tags CSV: {e}")
+    return tags
 
 
 def load_config() -> dict:
@@ -73,6 +141,21 @@ async def lifespan(app: FastAPI):
     cfg = load_config()
     apply_config_to_proxy(cfg)
     proxy.add_log("Ứng dụng OPC UA Proxy Server đã khởi động")
+
+    # Tải danh sách tag từ CSV nếu có (kích hoạt Direct mode)
+    if TAG_CSV_PATH.exists():
+        tag_list = load_tag_list_from_csv(TAG_CSV_PATH)
+        if tag_list:
+            proxy.tag_list = tag_list
+            proxy.add_log(
+                f"Đã tải {len(tag_list)} tag từ '{TAG_CSV_PATH.name}' → Direct mode"
+            )
+        else:
+            proxy.add_log(
+                f"File '{TAG_CSV_PATH.name}' không có tag hợp lệ → Browse mode", "WARNING"
+            )
+    else:
+        proxy.add_log("Không tìm thấy 'tags.csv' → Browse mode (fallback)")
 
     # Tự động kết nối và bật proxy nếu cấu hình cho phép
     if cfg.get("autoConnect", True):
@@ -234,7 +317,7 @@ if __name__ == "__main__":
     print("  OPC UA Proxy Server đang chạy tại http://localhost:8080")
     print("=" * 55)
     uvicorn.run(
-        "main:app",
+        app,
         host="0.0.0.0",
         port=8080,
         log_level="info",

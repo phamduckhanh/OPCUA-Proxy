@@ -28,6 +28,8 @@ class SubscriptionHandler(DataChangeNotificationHandler):
             "value": self._serialize_value(val),
             "lastUpdate": now,
         }
+        # Đánh dấu node cần cập nhật lên proxy server
+        self._proxy._dirty_nodes.add(node_id_str)
 
     @staticmethod
     def _serialize_value(val: Any) -> Any:
@@ -65,6 +67,8 @@ class OPCUAProxy:
         self.variable_info: dict[str, dict] = {}
         # Mapping node_id source -> node proxy server
         self.proxy_nodes: dict[str, Any] = {}
+        # Tập node_id cần ghi lên proxy server (chỉ khi giá trị thực sự thay đổi)
+        self._dirty_nodes: set[str] = set()
 
         self.source_connected: bool = False
         self.proxy_running: bool = False
@@ -80,6 +84,10 @@ class OPCUAProxy:
         # Log nội bộ (tối đa 200 dòng)
         self.logs: list[dict] = []
         self._max_logs = 200
+
+        # Tag list cho Direct mode: [{"tagName", "address", "dataType"}]
+        # Nếu có dữ liệu → dùng Direct mode, bỏ qua Browse mode
+        self.tag_list: list[dict] = []
 
         # Task reconnect
         self._reconnect_task: asyncio.Task | None = None
@@ -102,6 +110,13 @@ class OPCUAProxy:
 
     def clear_logs(self):
         self.logs.clear()
+
+    # ── Mode ──────────────────────────────────────────────────
+
+    @property
+    def _direct_mode(self) -> bool:
+        """True nếu đang dùng Direct mode (có tag list từ CSV)."""
+        return len(self.tag_list) > 0
 
     # ── Source Client ────────────────────────────────────────
 
@@ -159,29 +174,120 @@ class OPCUAProxy:
     # ── Browse & Subscribe ───────────────────────────────────
 
     async def browse_and_subscribe(self):
-        """Browse đệ quy address space, subscribe tất cả biến."""
+        """Dispatch tới Direct mode hoặc Browse mode tuỳ theo cấu hình."""
         if not self.client or not self.source_connected:
             return
 
-        self.add_log("Đang browse address space...")
-        variables = []
-        objects_node = self.client.nodes.objects
-        await self._browse_recursive(objects_node, variables)
-
-        self.add_log(f"Tìm thấy {len(variables)} biến")
-
-        if not variables:
-            return
-
-        # Tạo subscription
-        handler = SubscriptionHandler(self)
-        self.subscription = await self.client.create_subscription(500, handler)
-        self.monitored_items = await self.subscription.subscribe_data_change(variables)
-        self.add_log(f"Đã subscribe {len(variables)} biến (samplingInterval=500ms)")
+        if self._direct_mode:
+            await self._direct_subscribe()
+        else:
+            await self._browse_subscribe()
 
         # Khởi động reconnect monitor
         self._stop_reconnect = False
         self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+
+    async def _browse_subscribe(self):
+        """Browse mode (fallback): duyệt toàn bộ address space rồi subscribe."""
+        self.add_log("Browse mode: Đang duyệt address space...")
+        variables = []
+        objects_node = self.client.nodes.objects
+        await self._browse_recursive(objects_node, variables)
+
+        self.add_log(f"Browse mode: Tìm thấy {len(variables)} biến")
+        if not variables:
+            return
+
+        handler = SubscriptionHandler(self)
+        self.subscription = await self.client.create_subscription(500, handler)
+        self.monitored_items = await self.subscription.subscribe_data_change(variables)
+        self.add_log(f"Browse mode: Đã subscribe {len(variables)} biến")
+
+    # Kích thước batch cho read/subscribe (tối ưu cho OPC UA)
+    _BATCH_SIZE = 200
+
+    async def _direct_subscribe(self):
+        """Direct mode: resolve và subscribe trực tiếp từ NodeId trong tag list CSV.
+
+        Tối ưu hiệu năng:
+          - get_node() chỉ tạo reference cục bộ (0 network call)
+          - Đọc giá trị ban đầu bằng batch read (1 OPC UA request / batch)
+          - Subscribe theo chunk (1 request / chunk)
+        """
+        total = len(self.tag_list)
+        self.add_log(f"Direct mode: Khởi tạo {total} tag...")
+
+        # Bước 1: tạo node reference (cục bộ, không gọi mạng)
+        nodes = []
+        tag_map: dict[int, dict] = {}  # index → tag info
+        for i, tag in enumerate(self.tag_list):
+            node = self.client.get_node(tag["address"])
+            nodes.append(node)
+            tag_map[i] = tag
+
+        # Bước 2: đọc giá trị ban đầu theo batch (1 OPC UA Read request / batch)
+        now = datetime.now(timezone.utc).isoformat()
+        failed = 0
+        for i in range(0, total, self._BATCH_SIZE):
+            batch_nodes = nodes[i: i + self._BATCH_SIZE]
+            batch_end = min(i + self._BATCH_SIZE, total)
+            try:
+                values = await asyncio.wait_for(
+                    self.client.read_values(batch_nodes), timeout=30
+                )
+            except Exception:
+                # Fallback: đánh dấu toàn batch là None
+                values = [None] * len(batch_nodes)
+
+            for j, val in enumerate(values):
+                idx = i + j
+                tag = tag_map[idx]
+                address = tag["address"]
+                serialized = SubscriptionHandler._serialize_value(val)
+                self.variable_info[address] = {
+                    "browseName": tag["tagName"],
+                    "proxyBrowseName": tag["tagName"],
+                    "dataType": tag.get("dataType", "Unknown"),
+                    "tagName": tag["tagName"],
+                }
+                self.variable_cache[address] = {
+                    "value": serialized,
+                    "lastUpdate": now,
+                }
+            self.add_log(f"  Đọc giá trị: {batch_end}/{total} tag")
+
+        self.add_log(f"Direct mode: {total - failed} tag OK, {failed} lỗi")
+        if not nodes:
+            return
+
+        # Bước 3: subscribe theo chunk
+        handler = SubscriptionHandler(self)
+        self.subscription = await self.client.create_subscription(500, handler)
+        self.monitored_items = await self._subscribe_chunked(nodes)
+        self.add_log(f"Direct mode: Đã subscribe {total} tag (samplingInterval=500ms)")
+
+    async def _subscribe_chunked(self, nodes: list) -> list:
+        """Subscribe nodes theo batch nhỏ (1 OPC UA request / batch)."""
+        all_items = []
+        total = len(nodes)
+        for i in range(0, total, self._BATCH_SIZE):
+            chunk = nodes[i: i + self._BATCH_SIZE]
+            try:
+                items = await self.subscription.subscribe_data_change(chunk)
+                if isinstance(items, list):
+                    all_items.extend(items)
+                else:
+                    all_items.append(items)
+                self.add_log(
+                    f"  Subscribe: {min(i + self._BATCH_SIZE, total)}/{total} tag"
+                )
+            except Exception as e:
+                self.add_log(
+                    f"  Lỗi subscribe batch [{i}:{i + self._BATCH_SIZE}]: {e}",
+                    "WARNING",
+                )
+            await asyncio.sleep(0.05)
+        return all_items
 
     def _apply_tag_rename(self, original_name: str) -> str:
         """Áp dụng cấu hình đổi tên biến. Trả về tên mới hoặc tên gốc."""
@@ -285,14 +391,17 @@ class OPCUAProxy:
                     self.source_connected = True
                     self.add_log("Đã kết nối lại thành công!")
 
-                    # Browse và subscribe lại
-                    variables = []
-                    await self._browse_recursive(self.client.nodes.objects, variables)
-                    if variables:
-                        handler = SubscriptionHandler(self)
-                        self.subscription = await self.client.create_subscription(500, handler)
-                        self.monitored_items = await self.subscription.subscribe_data_change(variables)
-                        self.add_log(f"Đã subscribe lại {len(variables)} biến")
+                    # Subscribe lại đúng mode đang cấu hình
+                    if self._direct_mode:
+                        await self._direct_subscribe()
+                    else:
+                        variables = []
+                        await self._browse_recursive(self.client.nodes.objects, variables)
+                        if variables:
+                            handler = SubscriptionHandler(self)
+                            self.subscription = await self.client.create_subscription(500, handler)
+                            self.monitored_items = await self._subscribe_chunked(variables)
+                            self.add_log(f"Đã subscribe lại {len(variables)} biến")
                 except Exception as e:
                     self.add_log(f"Kết nối lại thất bại: {e}", "ERROR")
 
@@ -321,9 +430,16 @@ class OPCUAProxy:
             uri = "urn:opcua:proxy:server"
             idx = await self.server.register_namespace(uri)
 
-            # Tạo lại cấu trúc folder và biến giống source
-            if self.source_connected and self.client:
-                await self._replicate_structure(self.client.nodes.objects, self.server.nodes.objects, idx)
+            # Tạo cấu trúc node trên proxy server
+            if self._direct_mode:
+                await self._build_direct_proxy_structure(self.server.nodes.objects, idx)
+            elif self.source_connected and self.client:
+                await self._replicate_structure(
+                    self.client.nodes.objects,
+                    self.server.nodes.objects,
+                    idx,
+                    folder_path="",
+                )
 
             await self.server.start()
             self.proxy_running = True
@@ -345,8 +461,21 @@ class OPCUAProxy:
             self.add_log(f"Lỗi khởi động proxy server: {e}", "ERROR")
             raise
 
-    async def _replicate_structure(self, source_node, proxy_parent, idx: int, depth: int = 0):
-        """Tạo lại cấu trúc folder/biến từ source lên proxy server."""
+    async def _replicate_structure(
+        self,
+        source_node,
+        proxy_parent,
+        idx: int,
+        depth: int = 0,
+        folder_path: str = "",
+    ):
+        """Tạo lại cấu trúc folder/biến từ source lên proxy server.
+
+        NodeId trên proxy server được tạo cố định (string NodeId) để đảm bảo
+        không thay đổi sau mỗi lần deploy/restart:
+          - Biến:  ns=<idx>;s=<source_node_id_str>    → duy nhất và ổn định
+          - Folder: ns=<idx>;s=folder:<browse_path>   → dựa trên đường dẫn đầy đủ
+        """
         if depth > 20:
             return
         try:
@@ -370,7 +499,13 @@ class OPCUAProxy:
                         cached = self.variable_cache.get(node_id_str, {})
                         val = cached.get("value")
                         try:
-                            var = await proxy_parent.add_variable(idx, proxy_name, val if val is not None else 0)
+                            # NodeId cố định dựa trên NodeId của source → không đổi qua các lần restart
+                            stable_node_id = ua.NodeId(node_id_str, idx)
+                            var = await proxy_parent.add_variable(
+                                stable_node_id,
+                                proxy_name,
+                                val if val is not None else 0,
+                            )
                             await var.set_writable()
                             self.proxy_nodes[node_id_str] = var
                         except Exception:
@@ -381,8 +516,13 @@ class OPCUAProxy:
                         if self._is_folder_excluded(name):
                             continue
                         try:
-                            folder = await proxy_parent.add_folder(idx, name)
-                            await self._replicate_structure(child, folder, idx, depth + 1)
+                            # NodeId cố định dựa trên đường dẫn đầy đủ → không đổi qua các lần restart
+                            full_path = f"{folder_path}/{name}" if folder_path else name
+                            stable_folder_id = ua.NodeId(f"folder:{full_path}", idx)
+                            folder = await proxy_parent.add_folder(stable_folder_id, name)
+                            await self._replicate_structure(
+                                child, folder, idx, depth + 1, folder_path=full_path
+                            )
                         except Exception:
                             pass
                 except Exception:
@@ -390,18 +530,52 @@ class OPCUAProxy:
         except Exception:
             pass
 
+    async def _build_direct_proxy_structure(self, parent_node, idx: int):
+        """Tạo cấu trúc proxy từ tag list (Direct mode).
+
+        NodeId proxy cố định: ns=<idx>;s=<tagName>
+        Không bao giờ thay đổi qua các lần restart, dù có đổi địa chỉ source.
+        """
+        created = 0
+        for tag in self.tag_list:
+            tag_name = tag["tagName"]
+            address = tag["address"]
+            cached = self.variable_cache.get(address, {})
+            val = cached.get("value")
+            try:
+                # NodeId cố định dùng tagName → ổn định qua mọi lần restart
+                stable_node_id = ua.NodeId(tag_name, idx)
+                var = await parent_node.add_variable(
+                    stable_node_id,
+                    tag_name,
+                    val if val is not None else 0,
+                )
+                await var.set_writable()
+                self.proxy_nodes[address] = var
+                created += 1
+            except Exception as e:
+                self.add_log(f"  Lỗi tạo proxy node '{tag_name}': {e}", "WARNING")
+        self.add_log(f"Direct mode: Đã tạo {created}/{len(self.tag_list)} node trên Proxy Server")
+
     async def _update_proxy_values(self):
-        """Cập nhật liên tục giá trị biến trên proxy server từ cache."""
+        """Cập nhật giá trị biến trên proxy server - chỉ những node thực sự thay đổi."""
         while self.proxy_running:
-            for node_id_str, proxy_node in list(self.proxy_nodes.items()):
+            await asyncio.sleep(0.2)
+            if not self._dirty_nodes:
+                continue
+            # Lấy và xóa dirty set nguyên tử
+            dirty = self._dirty_nodes.copy()
+            self._dirty_nodes.clear()
+            for node_id_str in dirty:
+                proxy_node = self.proxy_nodes.get(node_id_str)
+                if proxy_node is None:
+                    continue
                 cached = self.variable_cache.get(node_id_str)
                 if cached and cached.get("value") is not None:
                     try:
-                        val = cached["value"]
-                        await proxy_node.write_value(val)
+                        await proxy_node.write_value(cached["value"])
                     except Exception:
                         pass
-            await asyncio.sleep(1)
 
     async def stop_server(self):
         """Dừng OPC UA Proxy Server."""
@@ -415,6 +589,7 @@ class OPCUAProxy:
         self.server = None
         self.proxy_running = False
         self.proxy_nodes.clear()
+        self._dirty_nodes.clear()
         self.start_time = None
         self.add_log("Đã dừng Proxy Server")
 
@@ -431,6 +606,8 @@ class OPCUAProxy:
             "proxyRunning": self.proxy_running,
             "variableCount": len(self.variable_info),
             "uptime": uptime,
+            "directMode": self._direct_mode,
+            "tagListCount": len(self.tag_list),
         }
 
     def get_variables(self) -> list[dict]:

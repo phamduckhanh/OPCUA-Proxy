@@ -1,0 +1,9 @@
+# Bỏ qua các file build PyInstaller khi build Docker image
+dist/
+build/
+*.spec
+build_exe.bat
+requirements-dev.txt
+__pycache__/
+*.pyc
+*.pyo
