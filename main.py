@@ -54,6 +54,8 @@ STATIC_DIR = _BUNDLE_DIR / "static"
 CONFIG_PATH = _RUNTIME_DIR / "config.json"
 # tags.csv: copy file CSV cạnh exe/main.py để bật Direct mode
 TAG_CSV_PATH = _RUNTIME_DIR / "tags.csv"
+# File CSV thực tế đã nạp lúc khởi động (nơi tab Browse sẽ ghi thêm tag vào)
+ACTIVE_CSV_PATH: Path = TAG_CSV_PATH
 
 # ── Config mặc định ───────────────────────────────────────
 
@@ -65,6 +67,11 @@ DEFAULT_CONFIG = {
     "tagConfig": {},
     "excludeFolders": [],
     "excludeVariables": [],
+    # Timeout (giây). Sửa trong config.json rồi khởi động lại / kết nối lại.
+    #   requestTimeout: mỗi request thường tới source server (connect, read, subscribe)
+    #   browseTimeout : mỗi request browse ở tab Browse OPC Server
+    "requestTimeout": 10,
+    "browseTimeout": 60,
 }
 
 
@@ -141,6 +148,52 @@ def load_tag_list_from_csv(path: Path) -> list[dict]:
     return tags
 
 
+def append_tags_to_csv(path: Path, tags: list[dict]) -> None:
+    """Ghi thêm tag vào CSV mà KHÔNG sửa các dòng đã có.
+
+    Giữ nguyên định dạng file hiện tại (delimiter, encoding, có/không header).
+    File chưa tồn tại → tạo mới theo định dạng KEPServer (không header)."""
+    delimiter, encoding, needs_newline, header = ",", "utf-8", False, None
+    if path.exists() and path.stat().st_size > 0:
+        raw = path.read_bytes()
+        for enc in ("utf-8-sig", "cp1252"):
+            try:
+                text = raw.decode(enc)
+                encoding = "utf-8" if enc == "utf-8-sig" else enc
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError("Không đọc được encoding của file CSV hiện có")
+        needs_newline = not raw.endswith(b"\n")
+        first = text.splitlines()[0]
+        delimiter = ";" if first.count(";") > first.count(",") else ","
+        hdr = [h.strip().strip('"').lower() for h in next(csv.reader([first], delimiter=delimiter))]
+        if "tag name" in hdr and "address" in hdr:
+            header = hdr
+
+    def q(s: str) -> str:
+        return '"' + s.replace('"', '""') + '"'
+
+    lines = []
+    for t in tags:
+        if header:
+            cells = [""] * len(header)
+            cells[header.index("tag name")] = q(t["tagName"])
+            cells[header.index("address")] = q(t["address"])
+            if "data type" in header:
+                cells[header.index("data type")] = t["dataType"]
+        else:
+            # Định dạng KEPServer export: Name, Address, Type, 1, R/W, 100, ...
+            cells = [q(t["tagName"]), q(t["address"]), t["dataType"], "1", "R/W", "100"]
+            cells += [""] * 9 + ['""', ""]
+        lines.append(delimiter.join(cells))
+
+    with open(path, "ab") as f:
+        data = ("\r\n" if needs_newline else "") + "\r\n".join(lines) + "\r\n"
+        f.write(data.encode(encoding, errors="replace"))
+
+
 def load_config() -> dict:
     """Đọc config từ file, tạo mới nếu chưa tồn tại."""
     if CONFIG_PATH.exists():
@@ -166,6 +219,7 @@ proxy = OPCUAProxy()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown logic."""
+    global ACTIVE_CSV_PATH
     cfg = load_config()
     apply_config_to_proxy(cfg)
     proxy.add_log("Ứng dụng OPC UA Proxy Server đã khởi động")
@@ -177,6 +231,7 @@ async def lifespan(app: FastAPI):
         _cwd_csv = Path.cwd() / "tags.csv"
         if _cwd_csv.exists():
             _csv_path = _cwd_csv
+    ACTIVE_CSV_PATH = _csv_path
     proxy.add_log(f"Tìm tags.csv tại: {_csv_path}")
     if _csv_path.exists():
         tag_list = load_tag_list_from_csv(_csv_path)
@@ -244,10 +299,24 @@ class ConfigModel(BaseModel):
     tagConfig: dict[str, str] = {}
     excludeFolders: list[str] = []
     excludeVariables: list[str] = []
+    # Không bắt buộc: giao diện không gửi 2 trường này, giá trị trong file được giữ nguyên
+    requestTimeout: float | None = None
+    browseTimeout: float | None = None
+
+
+def _valid_timeout(value, default: float) -> float:
+    """Timeout hợp lệ: số trong khoảng 1–600 giây, sai thì dùng mặc định."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if 1 <= v <= 600 else default
 
 
 def apply_config_to_proxy(cfg: dict):
     """Áp dụng cấu hình từ dict vào proxy instance."""
+    proxy.request_timeout = _valid_timeout(cfg.get("requestTimeout"), DEFAULT_CONFIG["requestTimeout"])
+    proxy.browse_timeout = _valid_timeout(cfg.get("browseTimeout"), DEFAULT_CONFIG["browseTimeout"])
     proxy.source_url = cfg.get("sourceUrl", DEFAULT_CONFIG["sourceUrl"])
     proxy.proxy_port = cfg.get("proxyPort", DEFAULT_CONFIG["proxyPort"])
     proxy.tag_config = cfg.get("tagConfig", {})
@@ -290,7 +359,14 @@ async def get_config():
 @app.post("/api/config")
 async def post_config(cfg: ConfigModel):
     """Lưu cấu hình mới và áp dụng."""
-    data = cfg.model_dump()
+    # Gộp lên cấu hình hiện có: các khóa giao diện không gửi (VD: requestTimeout,
+    # browseTimeout) được giữ nguyên thay vì bị xóa/đặt lại về mặc định
+    data = {**load_config(), **cfg.model_dump(exclude_unset=True)}
+    for k in ("requestTimeout", "browseTimeout"):
+        if data.get(k) is None:
+            data[k] = DEFAULT_CONFIG[k]
+        elif not 1 <= data[k] <= 600:
+            raise HTTPException(status_code=400, detail=f"{k} phải trong khoảng 1-600 giây")
     # Validate port range
     if not (1024 <= data["proxyPort"] <= 65535):
         raise HTTPException(status_code=400, detail="Port phải trong khoảng 1024-65535")
@@ -345,6 +421,99 @@ async def api_clear_logs():
     """Xóa toàn bộ log."""
     proxy.clear_logs()
     return JSONResponse({"message": "Đã xóa log"})
+
+
+# ── Browse source server & thêm tag vào cấu hình ──────────
+
+class ReadNodesModel(BaseModel):
+    nodeIds: list[str]
+
+
+class TagItem(BaseModel):
+    tagName: str
+    address: str
+    dataType: str = "Unknown"
+
+
+class AddTagsModel(BaseModel):
+    tags: list[TagItem]
+
+
+@app.get("/api/browse/children")
+async def api_browse_children(nodeId: str = ""):
+    """Trang đầu của con trực tiếp của 1 node (rỗng = thư mục Objects gốc).
+    Gọi lười khi người dùng mở folder. Nếu `more` = true → gọi /browse/more."""
+    try:
+        return JSONResponse(await proxy.browse_children(nodeId or None))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e) or type(e).__name__)
+
+
+@app.get("/api/browse/more")
+async def api_browse_more(token: str):
+    """Trang tiếp theo của một folder lớn đang tải dở."""
+    try:
+        return JSONResponse(await proxy.browse_more(token))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e) or type(e).__name__)
+
+
+@app.post("/api/browse/cache/clear")
+async def api_browse_cache_clear():
+    """Xóa cache duyệt cây (nút "Tải lại")."""
+    proxy.clear_browse_cache()
+    return JSONResponse({"message": "Đã xóa cache"})
+
+
+@app.post("/api/browse/read")
+async def api_browse_read(body: ReadNodesModel):
+    """Đọc giá trị hiện tại + kiểu dữ liệu của các node đã chọn (tối đa 500)."""
+    if len(body.nodeIds) > 500:
+        raise HTTPException(status_code=400, detail="Tối đa 500 node mỗi lần đọc")
+    try:
+        return JSONResponse(await proxy.read_nodes_preview(body.nodeIds))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e) or repr(e))
+
+
+@app.post("/api/taglist/add")
+async def api_taglist_add(body: AddTagsModel):
+    """Thêm tag đã chọn vào tags.csv (append) và vào danh sách tag đang nạp."""
+    names = {t["tagName"] for t in proxy.tag_list}
+    addrs = {t["address"] for t in proxy.tag_list}
+    to_add: list[dict] = []
+    skipped: list[dict] = []
+    for t in body.tags:
+        name, addr = t.tagName.strip(), t.address.strip()
+        dtype = (t.dataType or "Unknown").strip() or "Unknown"
+        if not name or not addr:
+            skipped.append({"tagName": name, "reason": "Tên hoặc địa chỉ trống"})
+        elif name in names:
+            skipped.append({"tagName": name, "reason": "Tên proxy đã tồn tại"})
+        elif addr in addrs:
+            skipped.append({"tagName": name, "reason": "Địa chỉ đã có trong cấu hình"})
+        else:
+            names.add(name)
+            addrs.add(addr)
+            to_add.append({"tagName": name, "address": addr, "dataType": dtype})
+    if to_add:
+        try:
+            append_tags_to_csv(ACTIVE_CSV_PATH, to_add)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Không ghi được {ACTIVE_CSV_PATH}: {e}")
+        proxy.tag_list.extend(to_add)
+        proxy.add_log(f"Browse: đã thêm {len(to_add)} tag vào '{ACTIVE_CSV_PATH.name}'")
+    return JSONResponse({
+        "added": len(to_add),
+        "skipped": skipped,
+        "total": len(proxy.tag_list),
+        "csvPath": str(ACTIVE_CSV_PATH),
+        "restartRequired": bool(to_add) and proxy.source_connected,
+    })
 
 
 # ── Main ───────────────────────────────────────────────────

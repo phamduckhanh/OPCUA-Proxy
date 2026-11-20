@@ -135,6 +135,45 @@ tbody tr:hover { background: #1a2744; }
 .log-line.WARNING { color: #ffab40; }
 .log-line.INFO    { color: #b0bec5; }
 
+/* ── Tabs ─────────────────────────────────────────────── */
+.tabs { display: flex; gap: 4px; padding: 0 20px; background: #16213e; border-bottom: 1px solid #233554; }
+.tab-btn {
+  background: transparent; color: #90caf9; border-radius: 0;
+  padding: 11px 20px; border-bottom: 3px solid transparent; font-size: 14px;
+}
+.tab-btn.active { color: #fff; border-bottom-color: #0066ff; background: #0d1b36; }
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+
+/* ── Browse tab ───────────────────────────────────────── */
+.scan-bar { display: flex; align-items: center; gap: 12px; margin: 10px 0 4px; font-size: 13px; color: #90caf9; flex-wrap: wrap; }
+.progress { flex: 1; min-width: 120px; max-width: 320px; height: 5px; background: #0d1b36; border-radius: 3px; overflow: hidden; display: none; }
+.progress.on { display: block; }
+.progress > div { height: 100%; width: 35%; background: #0066ff; animation: slide 1.1s ease-in-out infinite; }
+@keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+.hint { font-size: 12px; color: #78909c; margin-top: 6px; line-height: 1.5; }
+.hint code { background: #0d1b36; padding: 1px 5px; border-radius: 3px; color: #b0bec5; }
+.res-wrap { max-height: 380px; overflow: auto; }
+.tag-added { color: #00e676; font-size: 12px; }
+.name-input { width: 100%; min-width: 160px; padding: 5px 8px; font-size: 13px; }
+.name-input.dup { border-color: #ff1744; }
+.val-cell { font-family: 'Cascadia Code', 'Fira Code', monospace; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+.btn-ghost { background: transparent; border: 1px solid #233554; color: #90caf9; }
+td.nowrap { max-width: none; }
+
+.tree ul { list-style: none; }
+.tn-children { margin-left: 18px; }
+.tn-children.root { margin-left: 0; }
+.tn-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; cursor: pointer; border-radius: 4px; font-size: 13px; }
+.tn-row:hover { background: #1a2744; }
+.tn-arrow { width: 14px; color: #90caf9; font-size: 11px; }
+.tn-meta { color: #78909c; font-size: 12px; }
+.tv { display: flex; align-items: center; gap: 10px; padding: 3px 6px; font-size: 13px; }
+.tv:hover { background: #1a2744; }
+.tv-name { min-width: 160px; }
+.tv-id { color: #78909c; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 520px; }
+
 /* ── Responsive ───────────────────────────────────────── */
 @media (max-width: 768px) {
   .config-grid { grid-template-columns: 1fr; }
@@ -159,7 +198,13 @@ tbody tr:hover { background: #1a2744; }
   </div>
 </div>
 
+<div class="tabs">
+  <button class="tab-btn active" id="tabBtnProxy" onclick="switchTab('proxy')">⚙ Proxy</button>
+  <button class="tab-btn" id="tabBtnBrowse" onclick="switchTab('browse')">🔎 Browse OPC Server</button>
+</div>
+
 <div class="container">
+<div class="tab-pane active" id="paneProxy">
 
 <!-- ── Cấu hình ────────────────────────────────────────── -->
 <div class="card">
@@ -237,6 +282,52 @@ tbody tr:hover { background: #1a2744; }
   </h2>
   <div class="log-box" id="logBox"></div>
 </div>
+
+</div><!-- paneProxy -->
+
+<!-- ══ Tab Browse OPC Server ═══════════════════════════════ -->
+<div class="tab-pane" id="paneBrowse">
+
+<div class="card">
+  <h2>Cây OPC Server</h2>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;">
+    <input type="text" class="search-box" id="brPattern" style="flex:1;min-width:260px;"
+           placeholder="Lọc biến trong các folder đã mở, VD: FI_101*Val   |   flow   |   re:^AI_.*MEAS$"
+           oninput="brOnPatternInput()" autocomplete="off">
+    <button class="btn-ghost btn-sm" onclick="brCollapseAll()">⊟ Thu gọn tất cả</button>
+    <button class="btn-ghost btn-sm" id="brReload" onclick="brReload(true)">🔄 Tải lại</button>
+  </div>
+  <div class="hint">
+    Bấm vào folder để mở — nội dung folder chỉ được tải khi bạn mở nó.
+    Ô lọc áp dụng cho biến trong các folder đã mở (khớp tên hoặc NodeId, không phân biệt hoa/thường):
+    <code>abc def</code> = chứa cả 2 từ &nbsp;·&nbsp; <code>*</code> <code>?</code> = wildcard &nbsp;·&nbsp; <code>re:...</code> = regex.
+    <span id="brPatErr" style="color:#ff5252;"></span>
+  </div>
+  <div class="hint" id="brRootStatus" style="margin-top:10px;"></div>
+  <div class="tree res-wrap" id="brTree" style="margin-top:12px;"></div>
+</div>
+
+<div class="card">
+  <h2>Tag đã chọn <span id="brSelCount" style="color:#78909c;font-weight:400;"></span></h2>
+  <div class="table-wrap" style="max-height:340px;overflow:auto;">
+    <table>
+      <thead><tr>
+        <th>Tên proxy (sửa được)</th><th>NodeId</th><th>Giá trị hiện tại</th><th>Kiểu</th><th style="width:50px"></th>
+      </tr></thead>
+      <tbody id="brSelBody"></tbody>
+    </table>
+  </div>
+  <div class="btn-row" style="margin-top:12px;">
+    <button class="btn-primary" id="brSave" onclick="brSave()" disabled>💾 Lưu vào cấu hình</button>
+    <button class="btn-ghost" onclick="brClearSel()">Xóa danh sách chọn</button>
+  </div>
+  <div class="hint">
+    Tag được ghi thêm (append) vào file <code>tags.csv</code>, các dòng cũ giữ nguyên.
+    Sau khi lưu cần <b>Ngắt kết nối → Kết nối → Bật Proxy</b> để áp dụng.
+  </div>
+</div>
+
+</div><!-- paneBrowse -->
 
 </div><!-- container -->
 
@@ -338,6 +429,8 @@ async function clearLogs() {
 async function refreshStatus() {
   try {
     const s = await api('GET', 'status');
+    srcConnected = !!s.sourceConnected;
+    directMode = !!s.directMode;
     // Source badge
     const dotSrc = document.getElementById('dotSource');
     const lblSrc = document.getElementById('lblSource');
@@ -365,6 +458,7 @@ async function refreshStatus() {
 
 /* ── Cập nhật bảng biến ──────────────────────────────── */
 async function refreshVariables() {
+  if (currentTab !== 'proxy') return;
   try {
     const vars = await api('GET', 'variables');
     document.getElementById('varCount').textContent = `Tổng: ${vars.length} biến`;
@@ -457,6 +551,378 @@ async function refreshLogs() {
     }).join('');
     box.scrollTop = box.scrollHeight;
   } catch(e) { /* ignore */ }
+}
+
+/* ══ Tab Browse OPC Server (cây lười: chỉ tải folder khi mở) ═══ */
+const VAR_PAGE = 200;           // số biến render mỗi lần trong 1 folder
+let srcConnected = false, directMode = false;
+let currentTab = 'proxy';
+let brLiveTimer = null, brDebounce = null;
+let brRoot = null;              // node gốc của cây
+let brMatch = () => true;       // hàm lọc biến theo pattern
+const brNodes = new Map();      // nodeId -> node folder đã tạo
+const brVarName = new Map();    // nodeId biến -> tên (cho checkbox)
+const brAdded = new Set();      // nodeId vừa lưu vào cấu hình trong phiên này
+const brSel = new Map();        // nodeId -> {nodeId, name, dataType, value, status, tr}
+
+const escAttr = s => esc(s).replace(/"/g, '&quot;');
+
+function switchTab(t) {
+  currentTab = t;
+  document.getElementById('paneProxy').classList.toggle('active', t === 'proxy');
+  document.getElementById('paneBrowse').classList.toggle('active', t === 'browse');
+  document.getElementById('tabBtnProxy').classList.toggle('active', t === 'proxy');
+  document.getElementById('tabBtnBrowse').classList.toggle('active', t === 'browse');
+  if (t === 'proxy') { refreshVariables(); return; }
+  brEnter();
+}
+
+async function brEnter() {
+  await refreshStatus();
+  const tree = document.getElementById('brTree');
+  if (!srcConnected) {
+    brRoot = null;
+    tree.innerHTML = '<div class="hint">Chưa kết nối source server — hãy bấm "Kết nối" ở tab Proxy trước.</div>';
+    return;
+  }
+  if (!brRoot) brReload();
+}
+
+/* ── Tạo / tải node ──────────────────────────────────── */
+function brNewNode(nodeId, name, ul, row) {
+  return { nodeId, name, ul, row, loaded: false, loading: false, expanded: false,
+           folders: [], variables: [], shown: VAR_PAGE, foldersEl: null, varsEl: null, metaEl: null };
+}
+
+async function brReload(userClick) {
+  // Người dùng bấm "Tải lại" → xóa cache duyệt cây ở server
+  if (userClick === true) { try { await api('POST', 'browse/cache/clear'); } catch (e) {} }
+  brNodes.clear();
+  const tree = document.getElementById('brTree');
+  tree.innerHTML = '';
+  document.getElementById('brRootStatus').textContent = '';
+  const ul = document.createElement('ul');
+  ul.className = 'tn-children root';
+  tree.appendChild(ul);
+  brRoot = brNewNode('', 'Objects', ul, null);
+  brRoot.expanded = true;
+  brLoad(brRoot);
+}
+
+/* Tải 1 folder theo từng trang: trang đầu hiện ngay, các trang sau nối thêm vào */
+async function brLoad(node) {
+  if (node.loading) return;
+  node.loading = true;
+  node.failed = false;
+  const t0 = Date.now();
+  let count = 0;
+  const rootSt = document.getElementById('brRootStatus');
+  const paint = () => {
+    const txt = `Đang tải… ${count ? count + ' mục, ' : ''}${Math.floor((Date.now() - t0) / 1000)}s`;
+    if (node.metaEl) { node.metaEl.textContent = txt; node.metaEl.style.color = ''; }
+    else { rootSt.textContent = txt; rootSt.style.color = ''; }
+  };
+  paint();
+  const timer = setInterval(paint, 500);
+  try {
+    let r = await api('GET', 'browse/children?nodeId=' + encodeURIComponent(node.nodeId));
+    node.folders = []; node.variables = [];
+    node.loaded = true; node.shown = VAR_PAGE;
+    brBuildChildren(node);
+    brAddPage(node, r); count += r.folders.length + r.variables.length;
+    while (r.more) {
+      r = await api('GET', 'browse/more?token=' + encodeURIComponent(r.token));
+      brAddPage(node, r); count += r.folders.length + r.variables.length;
+    }
+  } catch (e) {
+    node.failed = true;
+    node.loaded = false;                       // lần mở sau sẽ tải lại từ đầu
+    const msg = `Lỗi: ${e.message} — bấm để thử lại`;
+    if (node.metaEl) { node.metaEl.textContent = msg; node.metaEl.style.color = '#ff5252'; }
+    else { rootSt.textContent = msg; rootSt.style.color = '#ff5252'; }
+    if (!count && node.metaEl) {               // chưa có gì → thu gọn
+      node.expanded = false;
+      node.ul.style.display = 'none';
+      node.arrowEl.textContent = '▶';
+    }
+  } finally {
+    clearInterval(timer);
+    node.loading = false;
+    if (!node.failed) {
+      if (!node.metaEl) rootSt.textContent = '';
+      brRenderVars(node);
+    }
+  }
+}
+
+function brAddPage(node, r) {
+  r.folders.forEach(f => { node.folders.push(f); node.foldersUl.appendChild(brMakeFolderLi(f)); });
+  r.variables.forEach(v => node.variables.push(v));
+  brRenderVars(node);
+}
+
+/* Dựng khung con: vùng folder (thu gọn, chưa tải) + vùng biến */
+function brBuildChildren(node) {
+  node.ul.innerHTML = '';
+  node.foldersEl = document.createElement('li');
+  node.foldersEl.style.listStyle = 'none';
+  node.foldersUl = document.createElement('ul');
+  node.foldersUl.className = 'tn-children';
+  node.foldersEl.appendChild(node.foldersUl);
+  node.ul.appendChild(node.foldersEl);
+  node.varsEl = document.createElement('li');
+  node.varsEl.style.listStyle = 'none';
+  node.ul.appendChild(node.varsEl);
+}
+
+function brMakeFolderLi(f) {
+  const li = document.createElement('li');
+  li.className = 'tn';
+  const row = document.createElement('div');
+  row.className = 'tn-row';
+  row.innerHTML = '<span class="tn-arrow">▶</span><span class="tn-name"></span>' +
+                  '<span class="tn-meta"></span><button class="btn-ghost btn-sm tn-sel" style="display:none">☑ Chọn biến đang hiển thị</button>';
+  row.querySelector('.tn-name').textContent = '📁 ' + f.name;
+  const ul = document.createElement('ul');
+  ul.className = 'tn-children';
+  ul.style.display = 'none';
+  li.appendChild(row);
+  li.appendChild(ul);
+  const node = brNewNode(f.nodeId, f.name, ul, row);
+  node.arrowEl = row.querySelector('.tn-arrow');
+  node.metaEl = row.querySelector('.tn-meta');
+  node.selBtn = row.querySelector('.tn-sel');
+  brNodes.set(f.nodeId, node);
+  row.addEventListener('click', ev => {
+    if (ev.target === node.selBtn) return;
+    brToggle(node);
+  });
+  node.selBtn.addEventListener('click', () => {
+    node.variables.filter(v => !(v.added || brAdded.has(v.nodeId)) && brMatch(v))
+      .forEach(v => brAdd(v));
+    brSyncChecks();
+    brRenderSelected();
+  });
+  return li;
+}
+
+function brToggle(node) {
+  if (node.expanded) {
+    node.expanded = false;
+    node.ul.style.display = 'none';
+    node.arrowEl.textContent = '▶';
+    return;
+  }
+  node.expanded = true;
+  node.ul.style.display = '';
+  node.arrowEl.textContent = '▼';
+  if (!node.loaded) brLoad(node);
+}
+
+function brCollapseAll() {
+  brNodes.forEach(n => {
+    if (n.expanded) { n.expanded = false; n.ul.style.display = 'none'; n.arrowEl.textContent = '▶'; }
+  });
+}
+
+/* Hiển thị biến của 1 folder (đã lọc, phân trang) */
+function brRenderVars(node) {
+  if (!node.varsEl) return;
+  const all = node.variables;
+  const vis = all.filter(brMatch);
+  const part = vis.slice(0, node.shown);
+  const html = part.map(v => {
+    brVarName.set(v.nodeId, v.name);
+    const added = v.added || brAdded.has(v.nodeId);
+    return `<div class="tv"><input type="checkbox" data-nid="${escAttr(v.nodeId)}" ` +
+      `${brSel.has(v.nodeId) ? 'checked' : ''} ${added ? 'disabled' : ''}>` +
+      `<span class="tv-name" title="${escAttr(v.name)}">${esc(v.name)}</span>` +
+      `<span class="tv-id" title="${escAttr(v.nodeId)}">${esc(v.nodeId)}</span>` +
+      `${added ? '<span class="tag-added">✔ Đã có</span>' : ''}</div>`;
+  });
+  node.varsEl.innerHTML = html.join('');
+  if (vis.length > part.length) {
+    const more = document.createElement('button');
+    more.className = 'btn-ghost btn-sm';
+    more.style.margin = '6px 0 6px 22px';
+    more.textContent = `Hiển thị thêm (${part.length}/${vis.length})`;
+    more.addEventListener('click', () => { node.shown += VAR_PAGE; brRenderVars(node); });
+    node.varsEl.appendChild(more);
+  }
+  if (node.metaEl && !node.loading) {
+    const fc = node.folders.length;
+    const bits = [];
+    if (fc) bits.push(`${fc} folder`);
+    bits.push(vis.length === all.length ? `${all.length} biến` : `${vis.length}/${all.length} biến`);
+    node.metaEl.textContent = all.length || fc ? '· ' + bits.join(' · ') : '· (trống)';
+    node.metaEl.style.color = '';
+    node.selBtn.style.display = all.length ? '' : 'none';
+  }
+}
+
+/* ── Lọc theo pattern (chỉ áp dụng cho biến đã tải) ──── */
+function brBuildMatcher(p) {
+  p = (p || '').trim();
+  if (!p) return () => true;
+  if (p.toLowerCase().startsWith('re:')) {
+    const rx = new RegExp(p.slice(3), 'i');      // ném lỗi nếu regex sai → caller xử lý
+    return v => rx.test(v.name) || rx.test(v.nodeId);
+  }
+  if (/[*?]/.test(p)) {
+    const rx = new RegExp(p.toLowerCase().split('').map(c =>
+      c === '*' ? '.*' : c === '?' ? '.' : c.replace(/[.+^${}()|[\]\\]/g, '\\$&')).join(''));
+    return v => rx.test(v.name.toLowerCase()) || rx.test(v.nodeId.toLowerCase());
+  }
+  const words = p.toLowerCase().split(/\s+/);
+  return v => { const k = (v.name + '\n' + v.nodeId).toLowerCase(); return words.every(w => k.includes(w)); };
+}
+
+function brOnPatternInput() {
+  clearTimeout(brDebounce);
+  brDebounce = setTimeout(() => {
+    const err = document.getElementById('brPatErr');
+    try { brMatch = brBuildMatcher(document.getElementById('brPattern').value); err.textContent = ''; }
+    catch (e) { brMatch = () => true; err.textContent = ' Regex không hợp lệ'; }
+    brNodes.forEach(n => { if (n.loaded) { n.shown = VAR_PAGE; brRenderVars(n); } });
+    if (brRoot && brRoot.loaded) { brRoot.shown = VAR_PAGE; brRenderVars(brRoot); }
+  }, 250);
+}
+
+/* ── Chọn biến ───────────────────────────────────────── */
+document.addEventListener('change', e => {
+  const cb = e.target;
+  if (cb.matches && cb.matches('#brTree input[type=checkbox]')) {
+    const id = cb.dataset.nid;
+    if (cb.checked) brAdd({ nodeId: id, name: brVarName.get(id) || id }); else brSel.delete(id);
+    brRenderSelected();
+  }
+});
+
+function brAdd(it) {
+  if (!brSel.has(it.nodeId))
+    brSel.set(it.nodeId, { nodeId: it.nodeId, name: it.name, dataType: '', value: '', status: '' });
+}
+
+function brSyncChecks() {
+  document.querySelectorAll('#brTree input[type=checkbox][data-nid]').forEach(cb => {
+    cb.checked = brSel.has(cb.dataset.nid);
+  });
+}
+
+function brClearSel() {
+  brSel.clear();
+  brSyncChecks();
+  brRenderSelected();
+}
+
+function brCheckDupNames() {
+  const cnt = {};
+  brSel.forEach(s => { cnt[s.name] = (cnt[s.name] || 0) + 1; });
+  brSel.forEach(s => {
+    if (s.tr) s.tr.querySelector('input').classList.toggle('dup', !s.name.trim() || cnt[s.name] > 1);
+  });
+  return cnt;
+}
+
+function brRenderSelected() {
+  const body = document.getElementById('brSelBody');
+  body.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  brSel.forEach(s => {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td><input type="text" class="name-input" value="${escAttr(s.name)}"></td>` +
+      `<td title="${escAttr(s.nodeId)}">${esc(s.nodeId)}</td>` +
+      `<td class="val-cell"></td><td></td>` +
+      `<td><button class="btn-copy" title="Bỏ chọn">✖</button></td>`;
+    tr.querySelector('input').addEventListener('input', ev => {
+      s.name = ev.target.value; brCheckDupNames();
+    });
+    tr.querySelector('button').addEventListener('click', () => {
+      brSel.delete(s.nodeId); brRenderSelected(); brSyncChecks();
+    });
+    s.tr = tr; s.valTd = tr.children[2]; s.typeTd = tr.children[3];
+    brPaintValue(s);
+    frag.appendChild(tr);
+  });
+  body.appendChild(frag);
+  brCheckDupNames();
+  document.getElementById('brSelCount').textContent = brSel.size ? `(${brSel.size})` : '';
+  document.getElementById('brSave').disabled = brSel.size === 0;
+  brLive();
+}
+
+function brPaintValue(s) {
+  if (!s.valTd) return;
+  const bad = s.status && s.status !== 'Good';
+  s.valTd.textContent = bad ? s.status : (s.value === null || s.value === undefined ? '' : String(s.value));
+  s.valTd.style.color = bad ? '#ff5252' : '';
+  s.typeTd.textContent = s.dataType || '';
+}
+
+/* Giá trị realtime của các tag đã chọn (poll 1s khi đang ở tab Browse) */
+async function brReadSelected() {
+  const ids = [...brSel.keys()].slice(0, 500);
+  if (!ids.length) return;
+  const res = await api('POST', 'browse/read', { nodeIds: ids });
+  res.forEach(r => {
+    const s = brSel.get(r.nodeId);
+    if (!s) return;
+    s.value = r.value; s.status = r.status;
+    if (r.dataType) s.dataType = r.dataType;
+    brPaintValue(s);
+  });
+}
+function brLive() {
+  if (brSel.size && !brLiveTimer) {
+    brLiveTimer = setInterval(async () => {
+      if (currentTab !== 'browse' || !srcConnected || !brSel.size) return;
+      try { await brReadSelected(); } catch(e) { /* bỏ qua lỗi tạm thời */ }
+    }, 1000);
+    brReadSelected().catch(() => {});
+  } else if (!brSel.size && brLiveTimer) {
+    clearInterval(brLiveTimer); brLiveTimer = null;
+  } else if (brSel.size) {
+    brReadSelected().catch(() => {});
+  }
+}
+
+async function brSave() {
+  if (!brSel.size) return;
+  const cnt = brCheckDupNames();
+  const bad = [...brSel.values()].filter(s => !s.name.trim() || cnt[s.name] > 1);
+  if (bad.length) return alert('Tên proxy bị trống hoặc trùng nhau (ô viền đỏ). Hãy sửa trước khi lưu.');
+  if (!directMode &&
+      !confirm('Hiện chưa có tags.csv nên proxy đang ở Browse mode (proxy TOÀN BỘ biến).\n' +
+               'Sau khi lưu, proxy sẽ chuyển sang Direct mode và CHỈ proxy các tag trong tags.csv.\nTiếp tục?'))
+    return;
+  try { await brReadSelected(); } catch(e) {}      // cập nhật kiểu dữ liệu mới nhất
+  const noType = [...brSel.values()].filter(s => !s.dataType);
+  if (noType.length &&
+      !confirm(`${noType.length} tag chưa đọc được kiểu dữ liệu (sẽ lưu là "Unknown"). Vẫn lưu?`)) return;
+
+  const tags = [...brSel.values()].map(s => ({
+    tagName: s.name.trim(), address: s.nodeId, dataType: s.dataType || 'Unknown',
+  }));
+  try {
+    const r = await api('POST', 'taglist/add', { tags });
+    let msg = `Đã thêm ${r.added} tag vào cấu hình (tổng ${r.total} tag).\nFile: ${r.csvPath}`;
+    if (r.skipped.length)
+      msg += `\n\nBỏ qua ${r.skipped.length} tag:\n` +
+        r.skipped.slice(0, 10).map(x => `- ${x.tagName}: ${x.reason}`).join('\n');
+    if (r.restartRequired)
+      msg += '\n\nCần Ngắt kết nối → Kết nối → Bật Proxy để áp dụng.';
+    alert(msg);
+    // Bỏ các tag đã thêm khỏi danh sách chọn; giữ lại tag bị bỏ qua để sửa
+    const skippedNames = new Set(r.skipped.map(x => x.tagName));
+    [...brSel.values()].forEach(s => {
+      if (!skippedNames.has(s.name.trim())) { brSel.delete(s.nodeId); brAdded.add(s.nodeId); }
+    });
+    brRenderSelected();
+    brNodes.forEach(n => { if (n.loaded) brRenderVars(n); });
+    if (brRoot && brRoot.loaded) brRenderVars(brRoot);
+    refreshStatus();
+  } catch(e) { alert('Lỗi lưu: ' + e.message); }
 }
 
 /* ── Khởi chạy ────────────────────────────────────────── */
