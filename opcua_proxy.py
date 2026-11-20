@@ -5,6 +5,7 @@ OPC UA Proxy - Module xử lý kết nối OPC UA Client/Server.
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,6 +13,71 @@ from asyncua import Client, Server, ua
 from asyncua.common.subscription import DataChangeNotificationHandler
 
 logger = logging.getLogger("opcua_proxy")
+
+# DIAG: hậu tố NodeId của tag cần chẩn đoán (xoá khi xong)
+DIAG_SUFFIX = ".FI_101.Val"
+DIAG_FILE = "diag_fi101.log"
+
+
+def _diag(msg: str):
+    """Ghi log chẩn đoán ra file riêng (kèm timestamp ms)."""
+    try:
+        with open(DIAG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {msg}\n")
+    except Exception:
+        pass
+
+# ── Helpers kiểu dữ liệu OPC UA ──────────────────────────
+
+_DTYPE_MAP: dict[str, ua.VariantType] = {
+    "float":   ua.VariantType.Float,
+    "double":  ua.VariantType.Double,
+    "int16":   ua.VariantType.Int16,
+    "short":   ua.VariantType.Int16,
+    "int32":   ua.VariantType.Int32,
+    "long":    ua.VariantType.Int32,
+    "int64":   ua.VariantType.Int64,
+    "llong":   ua.VariantType.Int64,
+    "uint16":  ua.VariantType.UInt16,
+    "word":    ua.VariantType.UInt16,
+    "uint32":  ua.VariantType.UInt32,
+    "dword":   ua.VariantType.UInt32,
+    "uint64":  ua.VariantType.UInt64,
+    "qword":   ua.VariantType.UInt64,
+    "boolean": ua.VariantType.Boolean,
+    "bool":    ua.VariantType.Boolean,
+    "string":  ua.VariantType.String,
+    "byte":    ua.VariantType.Byte,
+    "sbyte":   ua.VariantType.SByte,
+}
+
+
+def _dtype_to_variant_type(dtype: str) -> ua.VariantType | None:
+    """Chuyển chuỗi dataType (KEPServer/CSV) thành asyncua VariantType.
+    Trả về None nếu không nhận ra kiểu → để asyncua tự suy luận."""
+    return _DTYPE_MAP.get(dtype.strip().lower())
+
+
+def _make_variant(val: Any, dtype_str: str) -> Any:
+    """Tạo ua.Variant với kiểu dữ liệu đúng.
+
+    - Nếu dtype_str không nhận ra → trả lại val nguyên (asyncua tự suy luận).
+    - Nếu val là None → dùng giá trị mặc định phù hợp với kiểu.
+    """
+    vtype = _dtype_to_variant_type(dtype_str)
+    if vtype is None:
+        # Không biết kiểu — tránh dùng 0 (Int64) khi val=None, dùng 0.0 cho an toàn
+        return val
+    if val is None:
+        if vtype == ua.VariantType.Boolean:
+            val = False
+        elif vtype == ua.VariantType.String:
+            val = ""
+        elif vtype in (ua.VariantType.Float, ua.VariantType.Double):
+            val = 0.0
+        else:
+            val = 0
+    return ua.Variant(val, vtype)
 
 
 class SubscriptionHandler(DataChangeNotificationHandler):
@@ -24,6 +90,20 @@ class SubscriptionHandler(DataChangeNotificationHandler):
         """Callback khi giá trị biến thay đổi trên source server."""
         node_id_str = node.nodeid.to_string()
         now = datetime.now(timezone.utc).isoformat()
+        # ── DIAG: log chi tiết notification của tag cần theo dõi ──
+        if node_id_str.endswith(DIAG_SUFFIX):
+            try:
+                dv = data.monitored_item.Value
+                src_ts = dv.SourceTimestamp
+                status = dv.StatusCode.name if dv.StatusCode else None
+            except Exception:
+                src_ts, status = "?", "?"
+            prev = self._proxy.variable_cache.get(node_id_str, {}).get("value")
+            _diag(
+                f"[DIAG-NOTIF] val={val!r} prev={prev!r} status={status} "
+                f"srcTs={src_ts} sub={getattr(data, 'subscription_id', '?')} "
+                f"handler={id(self):x} client={id(self._proxy.client):x}"
+            )
         self._proxy.variable_cache[node_id_str] = {
             "value": self._serialize_value(val),
             "lastUpdate": now,
@@ -127,6 +207,12 @@ class OPCUAProxy:
         if not self.source_url:
             raise ValueError("Chưa cấu hình URL source server")
 
+        self.add_log(
+            f"[DIAG-CONNECT] connect() gọi; client cũ={self.client is not None}, "
+            f"subscription cũ={self.subscription is not None}, "
+            f"reconnect_task cũ chạy={bool(self._reconnect_task and not self._reconnect_task.done())}",
+            "WARNING",
+        )
         self.add_log(f"Đang kết nối tới {self.source_url}...")
         try:
             self.client = Client(url=self.source_url, timeout=10)
@@ -185,6 +271,8 @@ class OPCUAProxy:
 
         # Khởi động reconnect monitor
         self._stop_reconnect = False
+        if self._reconnect_task and not self._reconnect_task.done():
+            self.add_log("[DIAG-CONNECT] _reconnect_loop cũ vẫn chạy, đang tạo thêm loop mới!", "WARNING")
         self._reconnect_task = asyncio.create_task(self._reconnect_loop())
 
     async def _browse_subscribe(self):
@@ -501,10 +589,12 @@ class OPCUAProxy:
                         try:
                             # NodeId cố định dựa trên NodeId của source → không đổi qua các lần restart
                             stable_node_id = ua.NodeId(node_id_str, idx)
+                            dtype_str = self.variable_info[node_id_str].get("dataType", "")
+                            init_val = _make_variant(val, dtype_str)
                             var = await proxy_parent.add_variable(
                                 stable_node_id,
                                 proxy_name,
-                                val if val is not None else 0,
+                                init_val,
                             )
                             await var.set_writable()
                             self.proxy_nodes[node_id_str] = var
@@ -545,10 +635,11 @@ class OPCUAProxy:
             try:
                 # NodeId cố định dùng tagName → ổn định qua mọi lần restart
                 stable_node_id = ua.NodeId(tag_name, idx)
+                init_val = _make_variant(val, tag.get("dataType", ""))
                 var = await parent_node.add_variable(
                     stable_node_id,
                     tag_name,
-                    val if val is not None else 0,
+                    init_val,
                 )
                 await var.set_writable()
                 self.proxy_nodes[address] = var
@@ -559,8 +650,26 @@ class OPCUAProxy:
 
     async def _update_proxy_values(self):
         """Cập nhật giá trị biến trên proxy server - chỉ những node thực sự thay đổi."""
+        diag_last: dict[str, Any] = {}
         while self.proxy_running:
             await asyncio.sleep(0.2)
+            # ── DIAG: so sánh giá trị node proxy với cache để phát hiện client ghi đè ──
+            for addr, pnode in list(self.proxy_nodes.items()):
+                if not addr.endswith(DIAG_SUFFIX):
+                    continue
+                try:
+                    pv = await pnode.read_value()
+                except Exception:
+                    continue
+                cv = self.variable_cache.get(addr, {}).get("value")
+                if pv != diag_last.get(addr) or (cv is not None and pv != cv):
+                    if cv is not None and pv != cv and addr not in self._dirty_nodes:
+                        self.add_log(
+                            f"[DIAG-PROXY] node proxy={pv!r} KHÁC cache={cv!r} "
+                            f"mà không có dirty → có thể client ghi đè",
+                            "WARNING",
+                        )
+                    diag_last[addr] = pv
             if not self._dirty_nodes:
                 continue
             # Lấy và xóa dirty set nguyên tử
@@ -573,9 +682,16 @@ class OPCUAProxy:
                 cached = self.variable_cache.get(node_id_str)
                 if cached and cached.get("value") is not None:
                     try:
-                        await proxy_node.write_value(cached["value"])
-                    except Exception:
-                        pass
+                        val = cached["value"]
+                        # Ghi với kiểu dữ liệu đúng để tránh lỗi BadTypeMismatch
+                        dtype_str = self.variable_info.get(node_id_str, {}).get("dataType", "")
+                        write_val = _make_variant(val, dtype_str)
+                        await proxy_node.write_value(write_val)
+                        if node_id_str.endswith(DIAG_SUFFIX):
+                            _diag(f"[DIAG-WRITE] ghi lên proxy: {val!r}")
+                    except Exception as e:
+                        if node_id_str.endswith(DIAG_SUFFIX):
+                            _diag(f"[DIAG-WRITE] LỖI ghi proxy: {e!r}")
 
     async def stop_server(self):
         """Dừng OPC UA Proxy Server."""
@@ -616,11 +732,14 @@ class OPCUAProxy:
         for node_id, info in self.variable_info.items():
             cached = self.variable_cache.get(node_id, {})
             proxy_name = info.get("proxyBrowseName", info.get("browseName", ""))
+            value = cached.get("value")
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                value = None
             result.append({
                 "nodeId": node_id,
                 "browseName": info.get("browseName", ""),
                 "proxyBrowseName": proxy_name,
-                "value": cached.get("value"),
+                "value": value,
                 "dataType": info.get("dataType", "Unknown"),
                 "lastUpdate": cached.get("lastUpdate"),
             })

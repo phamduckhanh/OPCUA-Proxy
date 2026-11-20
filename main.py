@@ -71,43 +71,71 @@ DEFAULT_CONFIG = {
 def load_tag_list_from_csv(path: Path) -> list[dict]:
     """Phân tích file CSV export từ KEPServer/Ignition.
 
-    Định dạng yêu cầu:
-      Cột 'Tag Name' → tên tag expose trên proxy
-      Cột 'Address'  → NodeId OPC UA phía source (ví dụ: ns=3;s=...)
-      Cột 'Data Type'→ kiểu dữ liệu (Float, Boolean, Short, ...)
+    Hỗ trợ 2 định dạng:
+      A) Có header: cột 'Tag Name', 'Address', 'Data Type'
+      B) Không có header: cột 0=TagName, 1=Address, 2=DataType (KEPServer export mặc định)
+    Hỗ trợ: dấu phân cách , hoặc ;, encoding utf-8/utf-8-sig/cp1252.
     """
     tags: list[dict] = []
+    # Thử lần lượt các encoding phổ biến
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            with open(path, "r", encoding=encoding) as f:
+                sample = f.read(4096)
+            # Phát hiện delimiter: ; phổ biến ở locale EU/VN
+            delimiter = ";" if sample.count(";") > sample.count(",") else ","
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        logger.warning("Không thể đọc file CSV với các encoding thử nghiệm (utf-8, cp1252)")
+        return tags
+
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            reader = csv.reader(f)
+        with open(path, "r", encoding=encoding) as f:
+            reader = csv.reader(f, delimiter=delimiter)
             raw_header = next(reader, None)
             if raw_header is None:
+                logger.warning("File CSV trống (không có dòng nào)")
                 return tags
+
             header = [h.strip().strip('"').lower() for h in raw_header]
-            try:
+            logger.info(f"CSV delimiter='{delimiter}', encoding='{encoding}', first_row={header[:4]}")
+
+            # Kiểm tra xem dòng đầu có phải header không
+            has_header = "tag name" in header and "address" in header
+            if has_header:
                 idx_name = header.index("tag name")
                 idx_addr = header.index("address")
-                idx_dtype = header.index("data type")
-            except ValueError:
-                logger.warning(
-                    "File CSV không đúng định dạng "
-                    "(thiếu cột 'Tag Name', 'Address' hoặc 'Data Type')"
-                )
-                return tags
-            col_max = max(idx_name, idx_addr, idx_dtype)
-            for row in reader:
+                idx_dtype = header.index("data type") if "data type" in header else None
+                rows = reader
+            else:
+                # Không có header — dùng vị trí cố định (KEPServer export mặc định)
+                # col0=TagName, col1=Address, col2=DataType
+                idx_name, idx_addr, idx_dtype = 0, 1, 2
+                # Dòng đầu đã đọc là dữ liệu, đưa lại vào vòng lặp
+                from itertools import chain
+                rows = chain([raw_header], reader)
+
+            col_max = max(idx_name, idx_addr, idx_dtype if idx_dtype is not None else 0)
+            skipped = 0
+            for row in rows:
                 if len(row) <= col_max:
+                    skipped += 1
                     continue
-                tag_name = row[idx_name].strip()
-                address = row[idx_addr].strip()
-                data_type = row[idx_dtype].strip()
+                tag_name = row[idx_name].strip().strip('"')
+                address = row[idx_addr].strip().strip('"')
+                data_type = row[idx_dtype].strip().strip('"') if idx_dtype is not None else "Unknown"
                 if not tag_name or not address:
+                    skipped += 1
                     continue
                 tags.append({
                     "tagName": tag_name,
                     "address": address,
                     "dataType": data_type,
                 })
+            if skipped:
+                logger.info(f"CSV: bỏ qua {skipped} dòng không hợp lệ")
     except Exception as e:
         logger.warning(f"Lỗi đọc file tags CSV: {e}")
     return tags
@@ -143,19 +171,28 @@ async def lifespan(app: FastAPI):
     proxy.add_log("Ứng dụng OPC UA Proxy Server đã khởi động")
 
     # Tải danh sách tag từ CSV nếu có (kích hoạt Direct mode)
-    if TAG_CSV_PATH.exists():
-        tag_list = load_tag_list_from_csv(TAG_CSV_PATH)
+    # Tìm tags.csv: ưu tiên cạnh exe, fallback thư mục làm việc hiện tại
+    _csv_path = TAG_CSV_PATH
+    if not _csv_path.exists():
+        _cwd_csv = Path.cwd() / "tags.csv"
+        if _cwd_csv.exists():
+            _csv_path = _cwd_csv
+    proxy.add_log(f"Tìm tags.csv tại: {_csv_path}")
+    if _csv_path.exists():
+        tag_list = load_tag_list_from_csv(_csv_path)
         if tag_list:
             proxy.tag_list = tag_list
             proxy.add_log(
-                f"Đã tải {len(tag_list)} tag từ '{TAG_CSV_PATH.name}' → Direct mode"
+                f"Đã tải {len(tag_list)} tag từ '{_csv_path.name}' → Direct mode"
             )
         else:
             proxy.add_log(
-                f"File '{TAG_CSV_PATH.name}' không có tag hợp lệ → Browse mode", "WARNING"
+                f"File '{_csv_path.name}' không có tag hợp lệ → Browse mode", "WARNING"
             )
     else:
-        proxy.add_log("Không tìm thấy 'tags.csv' → Browse mode (fallback)")
+        proxy.add_log(
+            f"Không tìm thấy 'tags.csv' (đã kiểm tra: {TAG_CSV_PATH}, {Path.cwd() / 'tags.csv'}) → Browse mode (fallback)"
+        )
 
     # Tự động kết nối và bật proxy nếu cấu hình cho phép
     if cfg.get("autoConnect", True):
